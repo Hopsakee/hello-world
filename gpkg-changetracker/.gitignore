@@ -12,3 +12,6 @@ sample_waterways.gpkg
 
 # Marimo
 __marimo__/
+
+# Tooling caches
+.ruff_cache/
