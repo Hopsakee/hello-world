@@ -40,3 +40,22 @@ def test_empty_input_gives_empty_frames(session):
     assert vertices.empty and points.empty
     assert list(points.columns) == list(mapdata.POINT_COLUMNS)
     assert mapdata.bounds_of(points) is None
+
+
+def test_points_per_feature_spends_a_fixed_budget():
+    # Few features: full detail. Many: less per feature, never below a segment.
+    assert mapdata.points_per_feature(10) == mapdata.DEFAULT_MAX_POINTS
+    assert mapdata.points_per_feature(0) == mapdata.DEFAULT_MAX_POINTS
+    assert mapdata.points_per_feature(2000) == 6
+    assert mapdata.points_per_feature(100_000) == 2
+    for count in (1, 7, 750, 3000, 25_000):
+        drawn = count * mapdata.points_per_feature(count)
+        assert drawn <= max(mapdata.VERTEX_BUDGET, count * 2)
+
+
+def test_the_map_stays_inside_the_vertex_budget(session):
+    fids = [int(row["fid"]) for row in session.rows(limit=None)]
+    vertices, _ = mapdata.feature_frames(
+        session, fids, max_points=mapdata.points_per_feature(len(fids))
+    )
+    assert len(vertices) <= mapdata.VERTEX_BUDGET

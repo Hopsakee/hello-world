@@ -15,8 +15,9 @@ changed.
 - Saving writes a **new GeoPackage containing just the changed rows**, with the
   original schema, CRS, metadata and spatial index intact.
 - The file you open is **never written to**: all edits go to a working copy.
-- Map and table are linked - brush an area on the map to narrow the table, pick
-  a row to edit it and see it highlighted.
+- **Values are changed in the table itself**: click a cell, type, done.
+- Map and table are linked - zoom and click a feature on the map to work on it,
+  or brush an area to narrow the table.
 
 No GDAL, GEOS or geopandas needed: a GeoPackage is a SQLite database, and the
 handful of spatial operations this app performs are done directly on it.
@@ -57,17 +58,30 @@ the top (or browse for it).
    there, and reports the table, row count and CRS. Reopening the same file
    resumes where you left off; tick *Start over* to throw the working copy away.
 2. **Choose the features to work on.** Search, limit how many features are
-   loaded, and pick the columns you want in the table. Then either work with
-   the whole set or drag a box on the map (or switch the map to click-select) to
-   narrow it down.
-3. **Pick a row.** Click a row in the table. The detail map shows that feature
-   against the rest of the working set, and the row's current `changedate` and
-   changed fields are listed.
-4. **Edit the fields.** Choose which fields to edit; each gets an input that
-   matches the column - a spinner with the real minimum and maximum for
-   numbers, a length-capped text box, a dropdown for a coded-value domain.
-   *Apply changes to this row* validates everything, writes the fields that are
-   valid, reports per field what was rejected and why, and stamps `changedate`.
+   loaded, and pick the columns you want in the table. The map draws the
+   geometry of the loaded features:
+   - *zoom and click* (default): scroll to zoom, drag to pan, click a feature's
+     dot to work on that one feature, double-click to clear. Zooming matters -
+     a watercourse a few hundred metres long is thinner than a pixel when a
+     whole area is in view, which is why it looks like a dot until you zoom in.
+   - *drag a box*: brush a region to narrow the table to those features.
+3. **Change values in the table.** Click a cell in the table and type. Each
+   edit is checked against its column and stored immediately, and the row's
+   `changedate` is set to that moment. A value the column will not take (a word
+   in a number field, text over the column's length, a value outside its range)
+   is reported per cell with the reason, and the stored value is kept. Every
+   cell is a text cell on purpose: a typed numeric cell turns anything it
+   cannot parse into `0`, which for a bed level is a silent data error rather
+   than a rejected edit. `New row` and `delete row` do nothing - this app edits
+   attributes, not features.
+4. **Edit any field of one row.** The table shows the columns you selected; to
+   reach the other fields, pick a row and use the field-by-field editor. Each
+   field gets an input that matches the column - a number input with the real
+   minimum and maximum, a length-capped text box, a dropdown for a coded-value
+   domain. *Apply changes to this row* validates everything, writes the fields
+   that are valid, reports per field what was rejected and why, and stamps
+   `changedate`. The detail map next to it shows the selected feature against
+   the rest of the working set.
 5. **Tracked changes.** A table of every changed row, plus the full change log
    (when, which field, from what, to what, and the original value).
 6. **Save.** *Write GeoPackage with N changed row(s)* produces a new `.gpkg`
@@ -99,7 +113,8 @@ uv run gpkg-changetracker export mydata.gpkg out.gpkg # changed rows only
 | `geometry.py` | Reads GeoPackageBinary/WKB blobs, thins them and reprojects to lon/lat with `pyproj`. |
 | `gpkg_io.py` | Working copies, the `changedate` column, attribute updates, and writing the changed-rows-only file. |
 | `session.py` | The editing session: change log, `changedate` bookkeeping, export. |
-| `mapdata.py` | Builds the two small frames the map is drawn from. |
+| `mapdata.py` | Builds the two small frames the map is drawn from, inside a vertex budget. |
+| `grid.py` | Works out what changed in the editable table and applies it. |
 | `app.py` | The Marimo notebook: the UI and nothing else. |
 
 Details worth knowing:
@@ -117,8 +132,14 @@ Details worth knowing:
   the rows that did not change. That is why CRS definitions, metadata tables and
   the RTree index come out exactly as the source had them.
 - **The map has no basemap.** Vega-Lite draws the geometry itself, so the app
-  works offline; there are no background tiles. Features are thinned to ~14
-  vertices for drawing - the exported geometry is always the untouched original.
+  works offline; there are no background tiles. Features are thinned to at most
+  ~14 vertices for drawing, and the whole map shares a fixed vertex budget, so a
+  large working set stays responsive - the exported geometry is always the
+  untouched original.
+- **Marks are clipped.** Vega grows its drawing surface to fit marks that fall
+  outside the scale domain, so one zoom step on an unclipped map can produce a
+  canvas thousands of pixels wide and push the rest of the page off screen.
+  Every mark sets `clip=True`.
 
 ## Tests
 
@@ -128,5 +149,6 @@ uv run pytest
 
 The suite builds a small GeoPackage from scratch (typed columns, `CHECK`
 constraints, RTree with triggers, a coded-value domain), then covers schema
-reading, validation, change tracking, revert behaviour, export validity, the
-CLI, and a headless run of the Marimo notebook.
+reading, validation, change tracking, revert behaviour, table edits (including
+the values a column refuses and rows a grid invents), export validity, the CLI,
+and a headless run of the Marimo notebook.

@@ -69,7 +69,19 @@ def test_reals_keep_real_storage_and_accept_a_decimal_comma():
     assert isinstance(value, float) and value == 1.25
     assert isinstance(coerce_value(REAL, 2), float)
     with pytest.raises(ValidationError, match="finite"):
-        coerce_value(REAL, float("nan"))
+        coerce_value(REAL, float("inf"))
+
+
+def test_a_cleared_table_cell_means_null():
+    # Table widgets report an emptied cell as NaN rather than None.
+    assert coerce_value(REAL, float("nan")) is None
+    with pytest.raises(ValidationError, match="required"):
+        coerce_value(
+            FieldSpec(
+                name="depth", declared_type="FLOAT", storage="real", nullable=False
+            ),
+            float("nan"),
+        )
 
 
 def test_booleans_become_zero_or_one():

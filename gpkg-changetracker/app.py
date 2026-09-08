@@ -35,7 +35,12 @@ def _():
     import altair as alt
     import pandas as pd
 
-    from gpkg_changetracker import mapdata
+    # Altair refuses to render more than 5000 inline rows by default, which a
+    # few hundred thinned watercourses already exceed; the app keeps the row
+    # count in hand itself (see the vertex budget below).
+    alt.data_transformers.disable_max_rows()
+
+    from gpkg_changetracker import grid, mapdata
     from gpkg_changetracker.gpkg_io import CHANGEDATE_COLUMN
     from gpkg_changetracker.session import ChangeTrackingSession
 
@@ -44,6 +49,7 @@ def _():
         ChangeTrackingSession,
         Path,
         alt,
+        grid,
         mapdata,
         math,
         pd,
@@ -165,9 +171,9 @@ def _(CHANGEDATE_COLUMN, live, mo):
         full_width=True,
     )
     map_selection_mode = mo.ui.dropdown(
-        options={"drag a box": "interval", "click a feature": "point"},
-        value="drag a box",
-        label="Map selection",
+        options={"zoom and click": "click", "drag a box": "box"},
+        value="zoom and click",
+        label="Map interaction",
     )
     refresh_map_button = mo.ui.run_button(label="Redraw map", kind="neutral")
 
@@ -219,8 +225,14 @@ def _(
         columns=[live.pk_column, *display_columns.value],
     )
     candidate_fids = [int(row[live.pk_column]) for row in candidate_rows]
+    # Vertices are drawn inline in the browser, so the whole map gets a budget
+    # and the per-feature detail is whatever fits inside it.
+    _points_per_feature = mapdata.points_per_feature(len(candidate_fids))
     vertices_df, points_df = mapdata.feature_frames(
-        live, candidate_fids, label_columns=display_columns.value[:3]
+        live,
+        candidate_fids,
+        label_columns=display_columns.value[:3],
+        max_points=_points_per_feature,
     )
     return candidate_fids, points_df, vertices_df
 
@@ -290,9 +302,36 @@ def _(
     _y = alt.Y(
         "lat:Q", title="latitude", scale=alt.Scale(domain=lat_domain, nice=False)
     )
+
+    # Watercourses are a few hundred metres long: at the extent of a whole area
+    # they are shorter than a pixel, which is why the map needs to zoom. The
+    # param is named "pan_zoom" because marimo leaves such a param out of the
+    # selection it reports back.
+    if map_selection_mode.value == "box":
+        _params = (alt.selection_interval(name="box", encodings=["x", "y"]),)
+        _hint = (
+            "Drag a box over the features to work on. Switch to zoom and click "
+            "to zoom in on the lines."
+        )
+    else:
+        _params = (
+            alt.selection_point(
+                name="pick", fields=["fid"], on="click", clear="dblclick"
+            ),
+            alt.selection_interval(bind="scales", name="pan_zoom"),
+        )
+        _hint = (
+            "Scroll to zoom in until the lines show their shape, drag to pan, "
+            "click a feature's dot to work on that feature alone, double-click "
+            "to clear."
+        )
+
+    # clip=True matters: without it Vega grows the drawing surface to fit marks
+    # that fall outside the scale domain, so one zoom step can blow the canvas
+    # up to thousands of pixels and push the rest of the page off screen.
     _lines = (
         alt.Chart(vertices_df)
-        .mark_line(strokeWidth=2)
+        .mark_line(strokeWidth=2.5, clip=True)
         .encode(
             x=_x,
             y=_y,
@@ -303,22 +342,25 @@ def _(
     )
     _handles = (
         alt.Chart(points_df)
-        .mark_point(size=70, filled=True, opacity=0.85)
+        .mark_point(size=45, filled=True, opacity=0.9, clip=True)
         .encode(
             x=_x,
             y=_y,
             color=alt.Color("status:N", scale=STATUS_COLOURS, title="status"),
             tooltip=["fid:Q", "label:N", f"{CHANGEDATE_COLUMN}:N"],
         )
+        .add_params(*_params)
     )
     map_chart = mo.ui.altair_chart(
         alt.layer(_lines, _handles)
         .properties(width=MAP_WIDTH, height=MAP_HEIGHT)
         .configure_view(strokeWidth=0),
-        chart_selection=map_selection_mode.value,
+        # The chart brings its own selection params; marimo must not add more,
+        # or Vega fails with "Unrecognized signal name".
+        chart_selection=False,
         legend_selection=False,
     )
-    map_chart
+    mo.vstack([map_chart, mo.md(f"_{_hint}_")])
     return (map_chart,)
 
 
@@ -338,29 +380,57 @@ def _(
     candidate_fids,
     display_columns,
     get_version,
+    grid,
     live,
     mo,
     pd,
     working_fids,
 ):
     get_version()  # refresh after every edit
-    _columns = [live.pk_column, CHANGEDATE_COLUMN, *display_columns.value]
-    table_df = pd.DataFrame(
-        live.rows(fids=working_fids, columns=_columns, limit=None),
-        columns=_columns,
-    )
-    row_table = mo.ui.table(
-        table_df,
-        selection="single",
-        page_size=12,
-        label=(
-            f"**3. Pick a row to edit** - {len(working_fids)} of "
-            f"{len(candidate_fids)} loaded features "
-            f"{'(map selection active)' if len(working_fids) != len(candidate_fids) else ''}"
+    grid_columns = [live.pk_column, CHANGEDATE_COLUMN, *display_columns.value]
+    grid_rows = live.rows(fids=working_fids, columns=grid_columns, limit=None)
+    # The feature id and the app's own stamp stay read-only.
+    grid_editable = [
+        name
+        for name in display_columns.value
+        if live.schema.has(name) and live.field_spec(name).editable
+    ]
+    # Every cell is handed over as text on purpose. A typed numeric cell in the
+    # grid turns anything it cannot parse - a typo, a cleared cell - into 0,
+    # which for a bed level or a width is a real value and a silent data error.
+    # As text, whatever is typed reaches the validator, which either stores it
+    # in the column's own type or refuses it with a reason.
+    value_grid = mo.ui.data_editor(
+        pd.DataFrame(
+            [
+                {column: grid.as_cell_text(row.get(column)) for column in grid_columns}
+                for row in grid_rows
+            ],
+            columns=grid_columns,
         ),
+        editable_columns=grid_editable,
     )
-    row_table
-    return (row_table,)
+    mo.vstack(
+        [
+            mo.md(
+                f"""
+                ## 3. Change values in the table
+
+                {len(working_fids)} of {len(candidate_fids)} loaded features{
+                    " (narrowed by the map selection)"
+                    if len(working_fids) != len(candidate_fids)
+                    else ""
+                }. Click a cell and type to change a value; every value is checked
+                against its column before it is stored, and the row's
+                `changedate` is set to the moment it changed. New row and delete
+                row do nothing here - this app edits the attributes of existing
+                features.
+                """
+            ),
+            value_grid,
+        ]
+    )
+    return grid_editable, grid_rows, value_grid
 
 
 @app.cell
@@ -369,26 +439,78 @@ def _(mo):
     return get_selected_fid, set_selected_fid
 
 
-@app.cell
-def _(live, row_table, set_selected_fid):
-    _value = row_table.value
+@app.cell(hide_code=True)
+def _(
+    grid,
+    grid_editable,
+    grid_rows,
+    live,
+    mo,
+    pd,
+    set_selected_fid,
+    set_version,
+    value_grid,
+):
+    _returned = value_grid.value
     _rows = (
-        _value.to_dict("records") if hasattr(_value, "to_dict") else list(_value or [])
+        _returned.to_dict("records")
+        if isinstance(_returned, pd.DataFrame)
+        else list(_returned or [])
     )
-    if _rows:
-        # Keep the last picked row when the table is rebuilt after an edit.
-        set_selected_fid(int(_rows[0][live.pk_column]))
-    return
+    _outcome = grid.apply_grid_edits(live, grid_rows, _rows, grid_editable)
+
+    grid_feedback = mo.md("")
+    if _outcome.touched:
+        if _outcome.applied:
+            set_selected_fid(_outcome.last_fid)
+            set_version(lambda version: version + 1)
+        grid_feedback = mo.callout(mo.md(_outcome.summary()), kind=_outcome.kind)
+    grid_feedback
+    return (grid_feedback,)
 
 
 @app.cell(hide_code=True)
-def _(CHANGEDATE_COLUMN, get_selected_fid, get_version, live, mo):
+def _(display_columns, get_selected_fid, live, mo, working_fids):
+    _label_column = next(
+        (name for name in display_columns.value if live.schema.has(name)), None
+    )
+    _rows = live.rows(
+        fids=working_fids,
+        columns=[live.pk_column] + ([_label_column] if _label_column else []),
+        limit=None,
+    )
+    _options = {}
+    for _row in _rows:
+        _fid = int(_row[live.pk_column])
+        _suffix = f" - {_row[_label_column]}" if _label_column else ""
+        _options[f"{live.pk_column} {_fid}{_suffix}"] = _fid
+
+    _remembered = get_selected_fid()
+    _default = next((key for key, fid in _options.items() if fid == _remembered), None)
+    if _default is None and _options:
+        _default = next(iter(_options))  # never leave the field editor empty-handed
+    row_picker = mo.ui.dropdown(
+        options=_options,
+        value=_default,
+        searchable=True,
+        label="Row to inspect and edit field by field",
+        full_width=True,
+    )
+    row_picker
+    return (row_picker,)
+
+
+@app.cell(hide_code=True)
+def _(CHANGEDATE_COLUMN, get_version, live, mo, row_picker):
     get_version()
-    selected_fid = get_selected_fid()
+    selected_fid = row_picker.value
     mo.stop(
         selected_fid is None,
         mo.callout(
-            mo.md("Select a row in the table above to edit its fields."), kind="info"
+            mo.md(
+                "Pick a row above to edit every field of it, not just the columns in the table."
+            ),
+            kind="info",
         ),
     )
     selected_row = live.row(selected_fid)
@@ -430,12 +552,12 @@ def _(
         _y = alt.Y("lat:Q", title=None, scale=alt.Scale(domain=_lat, nice=False))
         _context = (
             alt.Chart(vertices_df)
-            .mark_line(strokeWidth=1, color="#c9d3dc")
+            .mark_line(strokeWidth=1, color="#c9d3dc", clip=True)
             .encode(x=_x, y=_y, detail="part:N", order="seq:Q")
         )
         _feature = (
             alt.Chart(_vertices)
-            .mark_line(strokeWidth=3.5)
+            .mark_line(strokeWidth=3.5, clip=True)
             .encode(
                 x=_x,
                 y=_y,
@@ -444,12 +566,12 @@ def _(
                 color=alt.Color("status:N", scale=STATUS_COLOURS, legend=None),
             )
         )
-        detail_map = mo.ui.altair_chart(
+        # A plain chart, not a mo.ui element: this one is a picture, not an
+        # input, and marimo's own altair formatter renders it reliably.
+        detail_map = (
             alt.layer(_context, _feature)
             .properties(width=MAP_WIDTH // 2, height=MAP_HEIGHT // 2)
-            .configure_view(strokeWidth=0),
-            chart_selection=False,
-            legend_selection=False,
+            .configure_view(strokeWidth=0)
         )
     detail_map
     return (detail_map,)
@@ -471,6 +593,9 @@ def _(live, mo, selected_row):
 
 @app.cell
 def _(field_picker, live, mo, selected_fid, selected_row):
+    def _in_range(bound, limit):
+        return bound is not None and -limit < bound < limit
+
     def build_input(spec, current):
         """Give every field an input that can only produce valid values."""
         hint = spec.describe()
@@ -502,9 +627,13 @@ def _(field_picker, live, mo, selected_fid, selected_row):
                 label=label,
             )
         if spec.storage in ("integer", "real"):
+            # Bounds beyond JavaScript's exact integer range (a FLOAT column
+            # reaches 3.4e38) only make the input warn; the validator still
+            # enforces them.
+            _safe = 2**53
             return mo.ui.number(
-                start=spec.minimum,
-                stop=spec.maximum,
+                start=spec.minimum if _in_range(spec.minimum, _safe) else None,
+                stop=spec.maximum if _in_range(spec.maximum, _safe) else None,
                 step=1 if spec.storage == "integer" else None,
                 value=None if current is None else float(current),
                 label=label,
@@ -585,10 +714,9 @@ def _(live, mo, revert_button, revert_picker, selected_fid, set_version):
 
 
 @app.cell(hide_code=True)
-def _(CHANGEDATE_COLUMN, get_selected_fid, get_version, live, mo, pd):
+def _(CHANGEDATE_COLUMN, get_version, live, mo, pd, row_picker):
     get_version()
-    # Independent of the row picker, so the overview shows even with nothing selected.
-    focus_fid = get_selected_fid()
+    focus_fid = row_picker.value
     _changed_fids = live.changed_fids()
     changed_table = pd.DataFrame(
         live.rows(

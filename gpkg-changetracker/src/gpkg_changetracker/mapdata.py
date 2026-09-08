@@ -21,8 +21,19 @@ from gpkg_changetracker.session import ChangeTrackingSession
 #: Vertices kept per feature; enough to keep a watercourse recognisable.
 DEFAULT_MAX_POINTS = 14
 
+#: Vertices the whole map may draw. Vega holds them inline in the page, so this
+#: is what keeps a big working set from freezing the browser.
+VERTEX_BUDGET = 12000
+
 VERTEX_COLUMNS = ("fid", "part", "seq", "lon", "lat", "status")
 POINT_COLUMNS = ("fid", "lon", "lat", "status", "label", CHANGEDATE_COLUMN)
+
+
+def points_per_feature(feature_count: int, budget: int = VERTEX_BUDGET) -> int:
+    """How much detail each feature may keep, given how many are drawn."""
+    if feature_count <= 0:
+        return DEFAULT_MAX_POINTS
+    return max(2, min(DEFAULT_MAX_POINTS, budget // feature_count))
 
 
 def feature_frames(
