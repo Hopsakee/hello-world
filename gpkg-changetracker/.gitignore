@@ -1,0 +1,17 @@
+# uv / Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Working copies and exports made while using the app
+.gpkg_changetracker/
+*.working.gpkg
+*_changed.gpkg
+sample_waterways.gpkg
+
+# Marimo
+__marimo__/
+
+# Tooling caches
+.ruff_cache/
