@@ -40,6 +40,22 @@ def utc_now_iso() -> str:
     return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
 
 
+def _is_empty(raw: Any) -> bool:
+    """An empty input: ``None``, blank text, or a null sentinel such as ``NaN``.
+
+    Table widgets report a cleared cell as ``NaN`` or ``NaT`` rather than
+    ``None``, and neither can be stored in a GeoPackage, so both mean "no
+    value" here.
+    """
+    if raw is None:
+        return True
+    if isinstance(raw, str):
+        return not raw.strip()
+    if isinstance(raw, float) and math.isnan(raw):
+        return True
+    return raw != raw  # NaT and friends are not equal to themselves
+
+
 def coerce_value(spec: FieldSpec, raw: Any) -> Any:
     """Validate ``raw`` against ``spec`` and return the value to store.
 
@@ -48,7 +64,7 @@ def coerce_value(spec: FieldSpec, raw: Any) -> Any:
     if not spec.editable:
         raise ValidationError(f"{spec.label} cannot be edited")
 
-    if raw is None or (isinstance(raw, str) and not raw.strip()):
+    if _is_empty(raw):
         if not spec.nullable:
             raise ValidationError(f"{spec.label} is required and cannot be empty")
         return None
